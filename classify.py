@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
 from termcolor import colored
 import json
+from normalizr import Normalizr
 import os
+import time
+from datetime import datetime
+import matplotlib.pyplot as plt
 import nltk
 import argparse
 from sys import exit
 import pickle
-from TwitterAPI import TwitterAPI
-from normalizr import Normalizr
+from TwitterAPI import TwitterAPI, TwitterRequestError, TwitterConnectionError
 
 CONSUMER_KEY = os.environ['CONSUMER_KEY']
 CONSUMER_SECRET = os.environ['CONSUMER_SECRET']
@@ -54,8 +58,28 @@ def install(pos_path, neg_path):
     with open('dump.p', 'wb') as fp:
         pickle.dump(tweets, fp)
 
-def main(tweets, classifier, hashtag):
+def plot(titletext, data, start, end):
+    positive = data['positive']
+    negative = data['negative']
+    total = positive + negative
 
+    labels = ['Positive','Negative']
+    sizes = [positive, negative]
+    colors = ['green','red']
+    
+    plt.figure(figsize=(10,10))
+    plt.pie(sizes, labels=labels, colors=colors,
+            autopct='%1.1f%%', startangle=90)
+    
+    title = 'Topic: {:s}\n Start: {:s} End: {:s}  \n Total number of tweets: {:d}'.format(titletext, start, end, total)
+    plt.title(title, y=1, bbox={'facecolor': '0.8', 'pad': 5})
+
+    plt.axis('equal')
+    timestr = time.strftime("%Y%m%d-%H%M%S")
+    plt.savefig('plots/' + timestr + '.svg',format='svg') # write plot to disk
+    plt.show()
+
+def main(tweets, classifier, topic):
     word_features = get_word_features(get_words_in_tweets(tweets))
     f = create_extracter(word_features)
 
@@ -72,21 +96,39 @@ def main(tweets, classifier, hashtag):
                  ACCESS_TOKEN_KEY,
                  ACCESS_TOKEN_SECRET)
 
-    print(colored('Will search for tweets with hashtag: #' + hashtag, 'blue'))
-    r = api.request('statuses/filter', {'track': '#' + hashtag, 'language': 'en'})
-
+    print(colored('Will search for tweets with topic: ' + topic, 'blue'))
+    data = {'positive': 0, 'negative': 0}
     normalizr = Normalizr(language='en')
-    try:
-        for item in r:
-            if 'text' in item:
-                tweet = normalizr.normalize(item['text'].lower())
-                res = classifier.classify(f(tweet.split()))
-                output = colored(tweet, 'green') + ': ' + res
-                print(output)
-    except KeyboardInterrupt:
-        pass
-
-    #   Use the collected data and plot
+    start = datetime.now().isoformat()
+    while True:
+        try:
+            r = api.request('statuses/filter', {'track': topic, 'language': 'en'})
+            for item in r:
+                if 'text' in item:
+                    text = item['text'].lower()
+                    #tweet = normalizr.normalize(text)
+                    res = classifier.classify(f(text.split()))
+                    data[res] += 1 # update result set
+                    output = colored(text, 'green') + ': ' + res
+                    print(output)
+                elif 'disconnect' in r:
+                    event = item['disconnect']
+                    if event['code'] in [2,5,6,7]:
+                        raise Exception(event['reason'])
+                    else:
+                        break
+        except TwitterRequestError as e:
+            if e.status_code < 500:
+                raise
+            else:
+                pass
+        except TwitterConnectionError:
+            pass
+        except KeyboardInterrupt:
+            print(colored('\nFinnished importing data... Will not continue generating plot', 'red'))
+            break
+    end = datetime.now().isoformat()
+    plot(topic, data, start, end)
 
 if __name__ == "__main__":
     print(colored('Welcome to Twitter analytics','blue'))
@@ -98,9 +140,10 @@ if __name__ == "__main__":
     parser.add_argument('-n','--neg_tweets',
             help = 'JSON of negative tweets',
             type = str)
-    parser.add_argument('-s','--search',
+    parser.add_argument('-t','--topic',
             help = 'Classifier',
-            type = str)
+            type = str,
+            default = 'yolo')
     args = parser.parse_args()
 
     if args.pos_tweets and args.neg_tweets:
@@ -108,9 +151,6 @@ if __name__ == "__main__":
     elif not args.pos_tweets and not args.neg_tweets:
         tweets = []
         classifier = None
-        hashtag = 'yolo'
-        if args.search:
-            hashtag = args.search
 
         try:
             with open('dump.p', 'rb') as fp:
@@ -122,6 +162,6 @@ if __name__ == "__main__":
                 classifier = pickle.load(fp)
         except IOError as e:
             print(colored('No classifier file found, generating...','red'))
-        main(tweets, classifier, hashtag)
+        main(tweets, classifier, args.topic)
     else:
-        exit('No sufficient fields')
+        exit('Missing required fields')
